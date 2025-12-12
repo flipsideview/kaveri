@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Project specific
+exports/
+*.db
+*.json
+!package.json
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+/var/
+
+# Credentials (never commit these!)
+.env
+*.env
+credentials.txt
+
+# HAR exports (API analysis data)
+har_exports/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Chrome profiles (temporary)
+kaveri_chrome_*/
+

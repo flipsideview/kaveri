@@ -1,0 +1,25 @@
+# KAVERI Citizen Assistant - Dependencies
+# Python 3.9+ required
+
+# Core dependencies
+pandas>=2.0.0
+requests>=2.28.0
+streamlit>=1.28.0
+openpyxl>=3.1.0  # For Excel export
+
+# Browser automation
+selenium>=4.15.0
+webdriver-manager>=4.0.0
+
+# Standard library (included with Python, listed for reference)
+# sqlite3 - built-in
+# json - built-in
+# logging - built-in
+# pathlib - built-in
+# dataclasses - built-in
+# argparse - built-in
+# typing - built-in
+# time - built-in
+# subprocess - built-in
+# sys - built-in
+
