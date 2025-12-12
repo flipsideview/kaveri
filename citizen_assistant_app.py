@@ -248,11 +248,12 @@ def main():
                 if platform.system() == "Darwin":  # macOS
                     # Open in new Terminal window so user can see prompts
                     # Terminal will close automatically when script completes
+                    script_dir = str(Path(__file__).parent.resolve())  # Get absolute path
                     script = " ".join(f'"{c}"' if " " in c else c for c in cmd)
                     apple_script = f'''
                     tell application "Terminal"
                         activate
-                        do script "cd {Path(__file__).parent} && {script}; echo ''; echo 'Press any key to close...'; read -n 1; exit"
+                        do script "cd {script_dir} && {script}; echo ''; echo 'Press any key to close...'; read -n 1; exit"
                     end tell
                     '''
                     subprocess.Popen(["osascript", "-e", apple_script])
