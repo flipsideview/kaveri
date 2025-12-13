@@ -28,6 +28,20 @@ from typing import Optional, Dict, List, Any
 from dataclasses import dataclass
 import csv
 
+# Load .env file if exists
+def load_dotenv():
+    """Load environment variables from .env file"""
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    os.environ.setdefault(key.strip(), value.strip())
+
+load_dotenv()
+
 # Selenium for initial login only
 try:
     from selenium import webdriver
