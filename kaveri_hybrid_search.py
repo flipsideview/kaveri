@@ -460,6 +460,7 @@ def launch_login_browser():
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
         from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.common.by import By
         from webdriver_manager.chrome import ChromeDriverManager
         
         opts = Options()
@@ -468,6 +469,9 @@ def launch_login_browser():
         
         temp_dir = tempfile.mkdtemp(prefix="kaveri_")
         opts.add_argument(f"--user-data-dir={temp_dir}")
+        
+        # Enable network logging to capture the token
+        opts.set_capability("goog:loggingPrefs", {"performance": "ALL"})
         
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=opts)
@@ -479,6 +483,93 @@ def launch_login_browser():
     except Exception as e:
         st.error(f"Failed to launch browser: {e}")
         return None, None
+
+
+def extract_token_from_browser(driver) -> str:
+    """
+    Automatically extract _append token from browser network logs.
+    Returns the token or None if not found.
+    """
+    try:
+        from selenium.webdriver.common.by import By
+        import json
+        
+        # Method 1: Try to get from performance logs
+        try:
+            logs = driver.get_log("performance")
+            for log in logs:
+                try:
+                    message = json.loads(log["message"])
+                    if "Network.requestWillBeSent" in str(message):
+                        params = message.get("message", {}).get("params", {})
+                        headers = params.get("request", {}).get("headers", {})
+                        if "_append" in headers:
+                            return headers["_append"]
+                except:
+                    continue
+        except:
+            pass
+        
+        # Method 2: Execute JavaScript to intercept from localStorage/sessionStorage
+        try:
+            # Check common storage locations
+            token = driver.execute_script("""
+                // Try localStorage
+                for (let key of Object.keys(localStorage)) {
+                    let val = localStorage.getItem(key);
+                    if (val && val.length === 32 && /^[a-f0-9]+$/.test(val)) {
+                        return val;
+                    }
+                }
+                // Try sessionStorage
+                for (let key of Object.keys(sessionStorage)) {
+                    let val = sessionStorage.getItem(key);
+                    if (val && val.length === 32 && /^[a-f0-9]+$/.test(val)) {
+                        return val;
+                    }
+                }
+                return null;
+            """)
+            if token:
+                return token
+        except:
+            pass
+        
+        # Method 3: Intercept XHR requests by triggering a dropdown
+        try:
+            # Click on district dropdown to trigger an API call
+            selects = driver.find_elements(By.TAG_NAME, "select")
+            for select in selects:
+                fc = select.get_attribute("formcontrolname") or ""
+                if "district" in fc.lower():
+                    # Get options
+                    from selenium.webdriver.support.ui import Select
+                    sel = Select(select)
+                    if len(sel.options) > 1:
+                        sel.select_by_index(1)  # Select first option
+                        import time
+                        time.sleep(2)
+                        
+                        # Now check logs again
+                        logs = driver.get_log("performance")
+                        for log in reversed(logs):  # Check most recent first
+                            try:
+                                message = json.loads(log["message"])
+                                msg = message.get("message", {})
+                                if msg.get("method") == "Network.requestWillBeSent":
+                                    headers = msg.get("params", {}).get("request", {}).get("headers", {})
+                                    if "_append" in headers:
+                                        return headers["_append"]
+                            except:
+                                continue
+                    break
+        except:
+            pass
+        
+        return None
+        
+    except Exception as e:
+        return None
 
 
 # ============== Main App ==============
@@ -547,14 +638,14 @@ def main():
         with col1:
             st.markdown("""
             <div class="status-card">
-                <h4>📋 Login Instructions</h4>
+                <h4>📋 Simple Login Steps</h4>
                 <ol>
                     <li><strong>Click "Launch Browser"</strong> below</li>
                     <li><strong>Enter your credentials</strong> (username & password)</li>
                     <li><strong>Solve the CAPTCHA</strong></li>
                     <li><strong>Enter OTP</strong> received on your phone</li>
                     <li><strong>Navigate to</strong> "Search by Party Name" page</li>
-                    <li><strong>Extract token</strong> from DevTools (F12 → Network)</li>
+                    <li><strong>Click "Extract Token"</strong> - we'll get it automatically!</li>
                 </ol>
             </div>
             """, unsafe_allow_html=True)
@@ -566,39 +657,91 @@ def main():
                         st.session_state["driver"] = driver
                         st.session_state["temp_dir"] = temp_dir
                         st.success("✅ Browser launched! Complete login in the browser window.")
+                        st.info("👉 After logging in and reaching the search page, click 'Extract Token' below")
         
         with col2:
             st.markdown("""
-            <div class="status-card warning">
-                <h4>🔑 Getting the Token</h4>
+            <div class="status-card success">
+                <h4>✨ Automatic Token Extraction</h4>
+                <p>After you login and reach the search page:</p>
                 <ol>
-                    <li>Press <strong>F12</strong> to open DevTools</li>
-                    <li>Go to <strong>Network</strong> tab</li>
-                    <li>Select any dropdown (District, etc.)</li>
-                    <li>Find request headers</li>
-                    <li>Copy <strong>_append</strong> value</li>
+                    <li>Make sure you're on <strong>"Search by Party Name"</strong> page</li>
+                    <li>Click <strong>"Extract Token"</strong> button</li>
+                    <li>We'll automatically capture your session!</li>
                 </ol>
+                <p><em>No DevTools needed!</em></p>
             </div>
             """, unsafe_allow_html=True)
         
-        # Token input
+        # Auto-extract token button
         st.markdown("---")
-        st.markdown("### Enter Session Token")
+        st.markdown("### 🔑 Extract Session Token")
         
-        token_input = st.text_input(
-            "Paste the _append token from browser DevTools:",
-            type="password",
-            help="Found in Network tab → Request Headers → _append"
-        )
+        col_btn1, col_btn2 = st.columns(2)
         
-        if st.button("✅ Save Token & Continue", type="primary"):
-            if token_input:
-                api = KaveriAPI()
-                api.set_token(token_input)
-                st.success("✅ Token saved! Go to Search tab.")
-                st.balloons()
-            else:
-                st.error("Please enter a token")
+        with col_btn1:
+            if st.button("🔄 Extract Token Automatically", type="primary", use_container_width=True):
+                if "driver" not in st.session_state:
+                    st.error("Please launch browser first!")
+                else:
+                    driver = st.session_state["driver"]
+                    with st.spinner("Extracting token from browser..."):
+                        try:
+                            # Check if on search page
+                            current_url = driver.current_url
+                            st.info(f"Current page: {current_url}")
+                            
+                            token = extract_token_from_browser(driver)
+                            
+                            if token:
+                                api = KaveriAPI()
+                                api.set_token(token)
+                                st.success(f"✅ Token extracted: {token[:8]}...{token[-4:]}")
+                                st.balloons()
+                                st.info("👉 Go to **Search** tab to start searching!")
+                            else:
+                                st.warning("Could not auto-extract token. Try manual method below.")
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+                            st.warning("Browser may have been closed. Try manual method.")
+        
+        with col_btn2:
+            if st.button("🗑️ Close Browser", use_container_width=True):
+                if "driver" in st.session_state:
+                    try:
+                        st.session_state["driver"].quit()
+                    except:
+                        pass
+                    del st.session_state["driver"]
+                    st.success("Browser closed")
+        
+        # Manual fallback
+        st.markdown("---")
+        with st.expander("📝 Manual Token Entry (if auto-extract fails)"):
+            st.markdown("""
+            **If automatic extraction doesn't work:**
+            1. In the browser, press **F12** to open DevTools
+            2. Go to **Network** tab
+            3. Click any dropdown (District, Taluka, etc.)
+            4. Click on the API request (GetTalukaAsync, etc.)
+            5. Look at **Request Headers**
+            6. Find **`_append`** and copy its value
+            """)
+            
+            token_input = st.text_input(
+                "Paste the _append token:",
+                type="password",
+                help="32-character hex string from request headers"
+            )
+            
+            if st.button("💾 Save Manual Token"):
+                if token_input and len(token_input) >= 20:
+                    api = KaveriAPI()
+                    api.set_token(token_input)
+                    st.success("✅ Token saved! Go to Search tab.")
+                    st.balloons()
+                else:
+                    st.error("Please enter a valid token (should be ~32 characters)")
     
     # ============== TAB 2: SEARCH ==============
     with tab2:
