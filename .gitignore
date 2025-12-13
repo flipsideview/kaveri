@@ -21,6 +21,7 @@ exports/
 *.db
 *.json
 !package.json
+!kaveri_locations_complete.json
 
 # Logs
 *.log
@@ -44,4 +45,5 @@ har_exports/
 
 # Chrome profiles (temporary)
 kaveri_chrome_*/
+
 
