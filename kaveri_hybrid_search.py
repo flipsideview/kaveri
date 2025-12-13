@@ -199,9 +199,14 @@ def save_session(data: Dict):
 
 
 def is_session_valid() -> bool:
-    """Check if we have a valid session"""
+    """Check if we have a valid session (token or cookies)"""
     session = load_session()
-    if not session.get("append_token"):
+    
+    # Need either token or cookies
+    has_token = bool(session.get("append_token"))
+    has_cookies = bool(session.get("cookies"))
+    
+    if not has_token and not has_cookies:
         return False
     
     # Check if session is less than 1 hour old
@@ -215,6 +220,17 @@ def is_session_valid() -> bool:
             pass
     
     return True
+
+
+def get_session_info() -> dict:
+    """Get session info for display"""
+    session = load_session()
+    return {
+        "has_token": bool(session.get("append_token")),
+        "token_preview": session.get("append_token", "")[:8] + "..." if session.get("append_token") else "None",
+        "cookie_count": len(session.get("cookies", [])),
+        "saved_at": session.get("saved_at", "Never")
+    }
 
 
 # ============== CAPTCHA Solver ==============
@@ -286,34 +302,115 @@ class CaptchaSolver:
 class KaveriAPI:
     """Direct API client for KAVERI"""
     
-    def __init__(self):
+    def __init__(self, browser_driver=None):
         self.session = requests.Session()
         self.session.headers.update({
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Origin": BASE_URL,
             "Referer": f"{BASE_URL}/",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/120.0.0.0"
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         })
         
         self._token = None
-        self._load_token()
+        self._driver = browser_driver  # Optional: use browser for requests
+        self._load_session()
     
-    def _load_token(self):
-        """Load token from saved session"""
-        session = load_session()
-        self._token = session.get("append_token")
+    def _load_session(self):
+        """Load token and cookies from saved session"""
+        saved = load_session()
+        self._token = saved.get("append_token")
+        
+        # Load cookies
+        for cookie in saved.get("cookies", []):
+            self.session.cookies.set(
+                cookie.get("name", ""),
+                cookie.get("value", ""),
+                domain=cookie.get("domain", "kaveri.karnataka.gov.in"),
+                path=cookie.get("path", "/")
+            )
     
-    def set_token(self, token: str):
-        """Set authentication token"""
+    def set_driver(self, driver):
+        """Set browser driver for making requests through browser"""
+        self._driver = driver
+    
+    def set_token(self, token: str, cookies: list = None):
+        """Set authentication token and cookies"""
         self._token = token
-        save_session({"append_token": token})
+        
+        # Save to file
+        session_data = {"append_token": token}
+        if cookies:
+            session_data["cookies"] = cookies
+            # Also set cookies on the session
+            for cookie in cookies:
+                self.session.cookies.set(
+                    cookie.get("name", ""),
+                    cookie.get("value", ""),
+                    domain=cookie.get("domain", "kaveri.karnataka.gov.in"),
+                    path=cookie.get("path", "/")
+                )
+        
+        save_session(session_data)
+    
+    def _fetch_via_browser(self, url: str, method: str = "POST", payload: dict = None) -> dict:
+        """Make API request through the browser using JavaScript fetch"""
+        if not self._driver:
+            raise Exception("No browser driver available")
+        
+        payload_json = json.dumps(payload or {})
+        
+        script = f"""
+        return await fetch("{url}", {{
+            method: "{method}",
+            headers: {{
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            }},
+            body: {payload_json if method == "POST" else "undefined"}
+        }}).then(r => r.json()).catch(e => ({{error: e.message}}));
+        """
+        
+        try:
+            result = self._driver.execute_script(f"return (async () => {{ {script} }})()")
+            return result
+        except Exception as e:
+            return {"error": str(e)}
     
     def generate_captcha(self) -> Tuple[str, bytes]:
         """Generate CAPTCHA, returns (captcha_id, image_bytes)"""
         resp = self.session.get(f"{API_URL}/Generate")
         resp.raise_for_status()
         return resp.headers.get("i"), resp.content
+    
+    def test_session(self) -> Tuple[bool, str]:
+        """Test if session is valid by making a simple API call"""
+        try:
+            headers = dict(self.session.headers)
+            if self._token:
+                headers["_append"] = self._token
+            
+            # Try to fetch districts (simple authenticated call)
+            resp = self.session.post(
+                f"{API_URL}/GetDistrictAsync",
+                headers=headers,
+                json={},
+                timeout=30
+            )
+            
+            if resp.status_code == 401:
+                return False, "401 Unauthorized - Session invalid"
+            
+            resp.raise_for_status()
+            data = resp.json()
+            
+            if isinstance(data, list) and len(data) > 0:
+                return True, f"Session valid! Got {len(data)} districts"
+            else:
+                return False, "Unexpected response"
+                
+        except Exception as e:
+            return False, str(e)
     
     def search(
         self,
@@ -322,14 +419,10 @@ class KaveriAPI:
         from_date: str,
         to_date: str,
         captcha_id: str,
-        captcha_code: str
+        captcha_code: str,
+        use_browser: bool = False
     ) -> List[Dict]:
         """Perform EC search"""
-        if not self._token:
-            raise Exception("No session token")
-        
-        headers = {**self.session.headers, "_append": self._token}
-        
         payload = {
             "_VillageCode": str(village_code),
             "_FromDate": from_date,
@@ -342,12 +435,41 @@ class KaveriAPI:
             "captchaCode": captcha_code
         }
         
+        # Try browser-based request if driver available and requested
+        if use_browser and self._driver:
+            try:
+                result = self._fetch_via_browser(f"{API_URL}/NewECSearch", "POST", payload)
+                if "error" in result:
+                    raise Exception(result["error"])
+                
+                if result.get("responseCode") != 1000:
+                    return []
+                
+                data_str = result.get("data", "[]")
+                try:
+                    return json.loads(data_str) if isinstance(data_str, str) else data_str
+                except:
+                    return []
+            except Exception as e:
+                # Fall back to requests
+                pass
+        
+        # Use requests library
+        headers = dict(self.session.headers)
+        if self._token:
+            headers["_append"] = self._token
+        
         resp = self.session.post(
             f"{API_URL}/NewECSearch",
             headers=headers,
             json=payload,
             timeout=60
         )
+        
+        # Handle 401 specifically
+        if resp.status_code == 401:
+            raise Exception("Session expired! Please login again (Tab 1)")
+        
         resp.raise_for_status()
         
         result = resp.json()
@@ -485,91 +607,106 @@ def launch_login_browser():
         return None, None
 
 
-def extract_token_from_browser(driver) -> str:
+def extract_session_from_browser(driver) -> dict:
     """
-    Automatically extract _append token from browser network logs.
-    Returns the token or None if not found.
+    Extract full session (token + cookies) from browser.
+    Returns dict with 'token' and 'cookies' or empty dict if failed.
     """
+    result = {"token": None, "cookies": []}
+    
     try:
         from selenium.webdriver.common.by import By
         import json
         
-        # Method 1: Try to get from performance logs
+        # Step 1: Get all cookies from browser
+        try:
+            cookies = driver.get_cookies()
+            result["cookies"] = cookies
+        except:
+            pass
+        
+        # Step 2: Try to get _append token from performance logs
         try:
             logs = driver.get_log("performance")
-            for log in logs:
+            for log in reversed(logs):  # Check most recent first
                 try:
                     message = json.loads(log["message"])
-                    if "Network.requestWillBeSent" in str(message):
-                        params = message.get("message", {}).get("params", {})
-                        headers = params.get("request", {}).get("headers", {})
+                    msg = message.get("message", {})
+                    if msg.get("method") == "Network.requestWillBeSent":
+                        headers = msg.get("params", {}).get("request", {}).get("headers", {})
                         if "_append" in headers:
-                            return headers["_append"]
+                            result["token"] = headers["_append"]
+                            break
                 except:
                     continue
         except:
             pass
         
-        # Method 2: Execute JavaScript to intercept from localStorage/sessionStorage
-        try:
-            # Check common storage locations
-            token = driver.execute_script("""
-                // Try localStorage
-                for (let key of Object.keys(localStorage)) {
-                    let val = localStorage.getItem(key);
-                    if (val && val.length === 32 && /^[a-f0-9]+$/.test(val)) {
-                        return val;
+        # Step 3: If no token yet, try localStorage/sessionStorage
+        if not result["token"]:
+            try:
+                token = driver.execute_script("""
+                    // Try localStorage
+                    for (let key of Object.keys(localStorage)) {
+                        let val = localStorage.getItem(key);
+                        if (val && val.length === 32 && /^[a-f0-9]+$/.test(val)) {
+                            return val;
+                        }
                     }
-                }
-                // Try sessionStorage
-                for (let key of Object.keys(sessionStorage)) {
-                    let val = sessionStorage.getItem(key);
-                    if (val && val.length === 32 && /^[a-f0-9]+$/.test(val)) {
-                        return val;
+                    // Try sessionStorage  
+                    for (let key of Object.keys(sessionStorage)) {
+                        let val = sessionStorage.getItem(key);
+                        if (val && val.length === 32 && /^[a-f0-9]+$/.test(val)) {
+                            return val;
+                        }
                     }
-                }
-                return null;
-            """)
-            if token:
-                return token
-        except:
-            pass
+                    return null;
+                """)
+                if token:
+                    result["token"] = token
+            except:
+                pass
         
-        # Method 3: Intercept XHR requests by triggering a dropdown
-        try:
-            # Click on district dropdown to trigger an API call
-            selects = driver.find_elements(By.TAG_NAME, "select")
-            for select in selects:
-                fc = select.get_attribute("formcontrolname") or ""
-                if "district" in fc.lower():
-                    # Get options
-                    from selenium.webdriver.support.ui import Select
-                    sel = Select(select)
-                    if len(sel.options) > 1:
-                        sel.select_by_index(1)  # Select first option
-                        import time
-                        time.sleep(2)
-                        
-                        # Now check logs again
-                        logs = driver.get_log("performance")
-                        for log in reversed(logs):  # Check most recent first
-                            try:
-                                message = json.loads(log["message"])
-                                msg = message.get("message", {})
-                                if msg.get("method") == "Network.requestWillBeSent":
-                                    headers = msg.get("params", {}).get("request", {}).get("headers", {})
-                                    if "_append" in headers:
-                                        return headers["_append"]
-                            except:
-                                continue
-                    break
-        except:
-            pass
+        # Step 4: If still no token, trigger a dropdown to capture it
+        if not result["token"]:
+            try:
+                selects = driver.find_elements(By.TAG_NAME, "select")
+                for select in selects:
+                    fc = select.get_attribute("formcontrolname") or ""
+                    if "district" in fc.lower():
+                        from selenium.webdriver.support.ui import Select
+                        sel = Select(select)
+                        if len(sel.options) > 1:
+                            sel.select_by_index(1)
+                            time.sleep(2)
+                            
+                            logs = driver.get_log("performance")
+                            for log in reversed(logs):
+                                try:
+                                    message = json.loads(log["message"])
+                                    msg = message.get("message", {})
+                                    if msg.get("method") == "Network.requestWillBeSent":
+                                        headers = msg.get("params", {}).get("request", {}).get("headers", {})
+                                        if "_append" in headers:
+                                            result["token"] = headers["_append"]
+                                            break
+                                except:
+                                    continue
+                        break
+            except:
+                pass
         
-        return None
+        return result
         
     except Exception as e:
-        return None
+        return result
+
+
+# Keep old function name for backward compatibility
+def extract_token_from_browser(driver) -> str:
+    """Extract just the token (legacy function)"""
+    result = extract_session_from_browser(driver)
+    return result.get("token")
 
 
 # ============== Main App ==============
@@ -587,9 +724,12 @@ def main():
     with st.sidebar:
         st.markdown("### ⚙️ System Status")
         
-        # Session status
+        # Session status with details
+        session_info = get_session_info()
         if is_session_valid():
             st.success("✅ Session Active")
+            st.caption(f"Token: {session_info['token_preview']}")
+            st.caption(f"Cookies: {session_info['cookie_count']}")
         else:
             st.warning("⚠️ No Active Session")
         
@@ -680,27 +820,39 @@ def main():
         col_btn1, col_btn2 = st.columns(2)
         
         with col_btn1:
-            if st.button("🔄 Extract Token Automatically", type="primary", use_container_width=True):
+            if st.button("🔄 Extract Session Automatically", type="primary", use_container_width=True):
                 if "driver" not in st.session_state:
                     st.error("Please launch browser first!")
                 else:
                     driver = st.session_state["driver"]
-                    with st.spinner("Extracting token from browser..."):
+                    with st.spinner("Extracting session from browser..."):
                         try:
                             # Check if on search page
                             current_url = driver.current_url
                             st.info(f"Current page: {current_url}")
                             
-                            token = extract_token_from_browser(driver)
+                            # Extract full session (token + cookies)
+                            session_data = extract_session_from_browser(driver)
+                            token = session_data.get("token")
+                            cookies = session_data.get("cookies", [])
                             
-                            if token:
+                            st.info(f"Found {len(cookies)} cookies")
+                            
+                            if cookies:  # We need cookies even if no token
                                 api = KaveriAPI()
-                                api.set_token(token)
-                                st.success(f"✅ Token extracted: {token[:8]}...{token[-4:]}")
+                                api.set_token(token or "", cookies)
+                                
+                                if token:
+                                    st.success(f"✅ Token: {token[:8]}...{token[-4:]}")
+                                else:
+                                    st.warning("⚠️ Token not found, but cookies saved. May still work!")
+                                
+                                st.success(f"✅ {len(cookies)} cookies saved!")
                                 st.balloons()
                                 st.info("👉 Go to **Search** tab to start searching!")
                             else:
-                                st.warning("Could not auto-extract token. Try manual method below.")
+                                st.error("No session data found. Make sure you're logged in!")
+                                st.warning("Try the manual method below.")
                         except Exception as e:
                             st.error(f"Error: {e}")
                             st.warning("Browser may have been closed. Try manual method.")
@@ -714,6 +866,21 @@ def main():
                         pass
                     del st.session_state["driver"]
                     st.success("Browser closed")
+        
+        # Test session button
+        st.markdown("---")
+        st.markdown("### 🧪 Test Session")
+        
+        if st.button("🔍 Test If Session Works", use_container_width=True):
+            with st.spinner("Testing session..."):
+                api = KaveriAPI()
+                success, message = api.test_session()
+                
+                if success:
+                    st.success(f"✅ {message}")
+                else:
+                    st.error(f"❌ {message}")
+                    st.warning("Session is invalid. Please login again.")
         
         # Manual fallback
         st.markdown("---")
@@ -836,6 +1003,23 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
         
+        # Options
+        st.markdown("---")
+        
+        col_opt1, col_opt2 = st.columns(2)
+        with col_opt1:
+            use_browser = st.checkbox(
+                "🌐 Use Browser for requests", 
+                value=True,
+                help="Keep browser open and make requests through it. More reliable but requires browser to stay open."
+            )
+        with col_opt2:
+            if "driver" in st.session_state:
+                st.success("✅ Browser connected")
+            else:
+                if use_browser:
+                    st.warning("⚠️ Launch browser in Login tab first")
+        
         # Search button
         st.markdown("---")
         
@@ -856,7 +1040,8 @@ def main():
                     st.error("No villages found")
                 else:
                     # Initialize
-                    api = KaveriAPI()
+                    driver = st.session_state.get("driver") if use_browser else None
+                    api = KaveriAPI(browser_driver=driver)
                     api_key = os.environ.get("CAPTCHA_API_KEY")
                     
                     if not api_key:
@@ -897,7 +1082,8 @@ def main():
                                 from_date=from_date.strftime("%Y-%m-%d"),
                                 to_date=to_date.strftime("%Y-%m-%d"),
                                 captcha_id=captcha_id,
-                                captcha_code=captcha_code
+                                captcha_code=captcha_code,
+                                use_browser=use_browser
                             )
                             
                             # Add metadata
