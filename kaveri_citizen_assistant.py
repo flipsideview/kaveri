@@ -173,7 +173,7 @@ def build_location_hierarchy(session: Optional[Session] = None) -> Dict[str, Lis
     
     # Save to JSON
     logger.info(f"Saving to {JSON_PATH}...")
-    JSON_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    JSON_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
     
     # Save to SQLite
     logger.info(f"Saving to {DB_PATH}...")
