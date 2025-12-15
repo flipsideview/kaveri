@@ -209,12 +209,13 @@ def is_session_valid() -> bool:
     if not has_token and not has_cookies:
         return False
     
-    # Check if session is less than 1 hour old
+    # Check if session is less than 2 hours old (increased from 1 hour)
     saved_at = session.get("saved_at")
     if saved_at:
         try:
             saved_time = datetime.fromisoformat(saved_at)
-            if (datetime.now() - saved_time).seconds > 3600:
+            age_seconds = (datetime.now() - saved_time).total_seconds()  # Fixed: use total_seconds()
+            if age_seconds > 7200:  # 2 hours
                 return False
         except:
             pass
@@ -225,11 +226,34 @@ def is_session_valid() -> bool:
 def get_session_info() -> dict:
     """Get session info for display"""
     session = load_session()
+    
+    # Calculate session age
+    saved_at = session.get("saved_at", "")
+    age_str = "Unknown"
+    is_expired = False
+    
+    if saved_at:
+        try:
+            saved_time = datetime.fromisoformat(saved_at)
+            age_seconds = (datetime.now() - saved_time).total_seconds()
+            if age_seconds < 60:
+                age_str = f"{int(age_seconds)}s ago"
+            elif age_seconds < 3600:
+                age_str = f"{int(age_seconds // 60)}m ago"
+            else:
+                age_str = f"{age_seconds / 3600:.1f}h ago"
+            
+            is_expired = age_seconds > 7200  # 2 hours
+        except:
+            pass
+    
     return {
         "has_token": bool(session.get("append_token")),
         "token_preview": session.get("append_token", "")[:8] + "..." if session.get("append_token") else "None",
         "cookie_count": len(session.get("cookies", [])),
-        "saved_at": session.get("saved_at", "Never")
+        "saved_at": saved_at,
+        "age": age_str,
+        "is_expired": is_expired
     }
 
 
@@ -610,20 +634,32 @@ def launch_login_browser():
 def extract_session_from_browser(driver) -> dict:
     """
     Extract full session (token + cookies) from browser.
-    Returns dict with 'token' and 'cookies' or empty dict if failed.
+    Returns dict with 'token', 'cookies', and 'errors' for debugging.
     """
-    result = {"token": None, "cookies": []}
+    result = {"token": None, "cookies": [], "errors": []}
+    
+    if driver is None:
+        result["errors"].append("Driver is None - browser may have been closed")
+        return result
     
     try:
         from selenium.webdriver.common.by import By
         import json
         
+        # Check if browser is still alive
+        try:
+            current_url = driver.current_url
+            result["current_url"] = current_url
+        except Exception as e:
+            result["errors"].append(f"Browser not responding: {e}")
+            return result
+        
         # Step 1: Get all cookies from browser
         try:
             cookies = driver.get_cookies()
-            result["cookies"] = cookies
-        except:
-            pass
+            result["cookies"] = cookies if cookies else []
+        except Exception as e:
+            result["errors"].append(f"Cookie extraction failed: {e}")
         
         # Step 2: Try to get _append token from performance logs
         try:
@@ -639,8 +675,8 @@ def extract_session_from_browser(driver) -> dict:
                             break
                 except:
                     continue
-        except:
-            pass
+        except Exception as e:
+            result["errors"].append(f"Performance log extraction failed: {e}")
         
         # Step 3: If no token yet, try localStorage/sessionStorage
         if not result["token"]:
@@ -664,8 +700,8 @@ def extract_session_from_browser(driver) -> dict:
                 """)
                 if token:
                     result["token"] = token
-            except:
-                pass
+            except Exception as e:
+                result["errors"].append(f"Storage extraction failed: {e}")
         
         # Step 4: If still no token, trigger a dropdown to capture it
         if not result["token"]:
@@ -693,12 +729,13 @@ def extract_session_from_browser(driver) -> dict:
                                 except:
                                     continue
                         break
-            except:
-                pass
+            except Exception as e:
+                result["errors"].append(f"Dropdown trigger failed: {e}")
         
         return result
         
     except Exception as e:
+        result["errors"].append(f"General error: {e}")
         return result
 
 
@@ -726,12 +763,30 @@ def main():
         
         # Session status with details
         session_info = get_session_info()
-        if is_session_valid():
+        session_valid = is_session_valid()
+        
+        if session_valid:
             st.success("✅ Session Active")
             st.caption(f"Token: {session_info['token_preview']}")
             st.caption(f"Cookies: {session_info['cookie_count']}")
+            st.caption(f"Age: {session_info['age']}")
         else:
-            st.warning("⚠️ No Active Session")
+            if session_info['is_expired']:
+                st.error("❌ Session Expired")
+                st.caption(f"Token was: {session_info['token_preview']}")
+                st.caption(f"Age: {session_info['age']} (>2h)")
+            elif not session_info['has_token']:
+                st.warning("⚠️ No Token Saved")
+                st.caption("Complete login and click 'Extract Session'")
+            else:
+                st.warning("⚠️ Session Invalid")
+                st.caption(f"Token: {session_info['token_preview']}")
+        
+        # Browser status
+        if "driver" in st.session_state:
+            st.info("🌐 Browser: Connected")
+        else:
+            st.caption("🌐 Browser: Not launched")
         
         # 2Captcha status
         api_key = os.environ.get("CAPTCHA_API_KEY")
@@ -827,18 +882,23 @@ def main():
                     driver = st.session_state["driver"]
                     with st.spinner("Extracting session from browser..."):
                         try:
-                            # Check if on search page
-                            current_url = driver.current_url
-                            st.info(f"Current page: {current_url}")
-                            
                             # Extract full session (token + cookies)
                             session_data = extract_session_from_browser(driver)
                             token = session_data.get("token")
                             cookies = session_data.get("cookies", [])
+                            errors = session_data.get("errors", [])
+                            current_url = session_data.get("current_url", "Unknown")
                             
-                            st.info(f"Found {len(cookies)} cookies")
+                            st.info(f"📍 Current page: {current_url}")
+                            st.info(f"🍪 Found {len(cookies)} cookies")
                             
-                            if cookies:  # We need cookies even if no token
+                            # Show any errors for debugging
+                            if errors:
+                                with st.expander("⚠️ Debug Info"):
+                                    for err in errors:
+                                        st.warning(err)
+                            
+                            if cookies or token:
                                 api = KaveriAPI()
                                 api.set_token(token or "", cookies)
                                 
@@ -847,15 +907,29 @@ def main():
                                 else:
                                     st.warning("⚠️ Token not found, but cookies saved. May still work!")
                                 
-                                st.success(f"✅ {len(cookies)} cookies saved!")
+                                if cookies:
+                                    st.success(f"✅ {len(cookies)} cookies saved!")
+                                
                                 st.balloons()
                                 st.info("👉 Go to **Search** tab to start searching!")
                             else:
-                                st.error("No session data found. Make sure you're logged in!")
-                                st.warning("Try the manual method below.")
+                                st.error("❌ No session data found!")
+                                st.markdown("""
+                                **Possible causes:**
+                                - Browser was closed
+                                - Not logged in yet
+                                - On wrong page (should be on 'Search by Party Name')
+                                
+                                **Try:**
+                                1. Make sure browser is still open
+                                2. Complete the login process
+                                3. Navigate to 'Search by Party Name' page
+                                4. Click any dropdown (District) to trigger API call
+                                5. Then click 'Extract Session' again
+                                """)
                         except Exception as e:
                             st.error(f"Error: {e}")
-                            st.warning("Browser may have been closed. Try manual method.")
+                            st.warning("Browser may have been closed. Launch browser again.")
         
         with col_btn2:
             if st.button("🗑️ Close Browser", use_container_width=True):
@@ -912,9 +986,22 @@ def main():
     
     # ============== TAB 2: SEARCH ==============
     with tab2:
-        if not is_session_valid():
-            st.warning("⚠️ Please complete login first (Tab 1)")
+        session_valid = is_session_valid()
+        browser_active = "driver" in st.session_state
+        
+        if not session_valid and not browser_active:
+            st.warning("⚠️ No active session. Please complete login first (Tab 1)")
+            st.info("""
+            **Quick steps:**
+            1. Go to **Login** tab
+            2. Click **Launch Browser**
+            3. Login in the browser window
+            4. Click **Extract Session**
+            """)
             st.stop()
+        elif not session_valid and browser_active:
+            st.warning("⚠️ Session not extracted yet! Click 'Extract Session' in Login tab, or proceed with browser-based requests.")
+            st.info("If you're logged in via browser, you can still search using 'Use Browser for requests' option below.")
         
         st.markdown("### Step 2: Configure Search")
         

@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import sqlite3
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -27,6 +28,17 @@ from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
 import requests
 from requests import Session
+
+# Fix Windows console encoding for Kannada/Unicode characters
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except AttributeError:
+        # Python < 3.7 fallback
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 try:
     from selenium import webdriver
@@ -356,7 +368,7 @@ def export_locations_csv(out_path: Path = Path("locations.csv")) -> None:
         df_v.to_excel(writer, sheet_name="villages", index=False)
         df_p.to_excel(writer, sheet_name="property_types", index=False)
     
-    df_v.to_csv(out_path, index=False)
+    df_v.to_csv(out_path, index=False, encoding='utf-8-sig')
     conn.close()
     logger.info(f"Exported to {out_path} and {out_path.with_suffix('.xlsx')}")
 
@@ -1484,7 +1496,7 @@ def run_search(args):
             records.append(base)
         
         df = pd.DataFrame(records)
-        df.to_csv(out_csv, index=False)
+        df.to_csv(out_csv, index=False, encoding='utf-8-sig')
         
         # Also save as Excel for easier viewing
         try:
@@ -1510,7 +1522,7 @@ def run_search(args):
             "status": "no_results_found",
             "locations_searched": len(combinations),
         }])
-        meta_df.to_csv(out_csv, index=False)
+        meta_df.to_csv(out_csv, index=False, encoding='utf-8-sig')
         print(f"No results found. Metadata saved to: {out_csv}")
     
     print(f"{'='*60}")
@@ -1562,7 +1574,7 @@ def run_api_direct_search(cfg: SearchConfig, args):
         rows = resp
 
     if rows:
-        pd.DataFrame(rows).to_csv(out_csv, index=False)
+        pd.DataFrame(rows).to_csv(out_csv, index=False, encoding='utf-8-sig')
         print(f"Wrote {len(rows)} rows to {out_csv}")
     else:
         print("No data returned from API search.")
